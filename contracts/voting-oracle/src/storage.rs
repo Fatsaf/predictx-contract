@@ -1,5 +1,6 @@
 use crate::DataKey;
-use predictx_shared::{PredictXError, UserStats, VoteChoice, VoteTally};
+use predictx_shared::UserStats;
+use predictx_shared::{PredictXError, VoteChoice, VoteTally};
 use soroban_sdk::{Address, Env, Vec};
 
 // ── Admin registry storage ────────────────────────────────────────────────────
@@ -137,14 +138,14 @@ pub fn write_reward_claimed(env: &Env, poll_id: u64, voter: &Address) {
 
 // ── User stats storage ────────────────────────────────────────────────────────
 //
-// `UserStats` is owned by the voting-oracle contract for the community-voting
-// fields (`votes_cast`, `voting_rewards_earned`). The staking-side fields are
-// written by PredictionMarket under a separate key namespace, so the two
-// contracts do not race on the same record. The frontend reads both via the
-// respective contract getters.
+// The `UserStats` record is owned by the PredictionMarket contract, which
+// writes the staking-side fields. To avoid cross-contract writes, the
+// voting-oracle keeps its own per-user voting stats in a separate key and
+// exposes them via `read_voting_stats` so the frontend can read them
+// alongside the staking stats.
 
-/// Read the voting-side `UserStats` for `user`, defaulting to zeroed stats.
-pub fn read_user_stats(env: &Env, user: &Address) -> UserStats {
+/// Read the voting-side stats for `user`, defaulting to zeroed counters.
+pub fn read_voting_stats(env: &Env, user: &Address) -> UserStats {
     env.storage()
         .persistent()
         .get(&DataKey::UserStats(user.clone()))
@@ -154,9 +155,23 @@ pub fn read_user_stats(env: &Env, user: &Address) -> UserStats {
         })
 }
 
-/// Persist the voting-side `UserStats` for `user`.
-pub fn write_user_stats(env: &Env, user: &Address, stats: &UserStats) {
+/// Persist the voting-side stats for `user`.
+pub fn write_voting_stats(env: &Env, user: &Address, stats: &UserStats) {
     env.storage()
         .persistent()
         .set(&DataKey::UserStats(user.clone()), stats);
+}
+
+/// Increment `votes_cast` for `user` by one.
+pub fn increment_votes_cast(env: &Env, user: &Address) {
+    let mut stats = read_voting_stats(env, user);
+    stats.votes_cast += 1;
+    write_voting_stats(env, user, &stats);
+}
+
+/// Add `amount` to `voting_rewards_earned` for `user`.
+pub fn add_voting_rewards_earned(env: &Env, user: &Address, amount: i128) {
+    let mut stats = read_voting_stats(env, user);
+    stats.voting_rewards_earned += amount;
+    write_voting_stats(env, user, &stats);
 }
