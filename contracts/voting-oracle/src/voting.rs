@@ -79,6 +79,9 @@ pub fn cast_vote(
     // Persist the choice itself (not just the count) so reward eligibility can
     // be checked against the resolved outcome later.
     storage::write_vote_choice(env, poll_id, &voter, choice);
+
+    // Track per-user voting stats. `votes_cast` increments once per vote.
+    bump_votes_cast(env, &voter);
     Ok(tally)
 }
 
@@ -166,6 +169,9 @@ pub fn claim_reward(env: &Env, voter: Address, poll_id: u64) -> Result<i128, Pre
         .persistent()
         .set(&DataKey::VoterReward(poll_id, voter.clone()), &share);
 
+    // Accumulate lifetime voting rewards earned across all polls.
+    add_voting_rewards_earned(env, &voter, share);
+
     env.events()
         .publish((Symbol::new(env, "RewardClaimed"), poll_id, voter), share);
 
@@ -185,6 +191,48 @@ fn eligible_voter_count(env: &Env, poll_id: u64, outcome: VoteChoice) -> u32 {
         }
     }
     count
+}
+
+/// Per-user voting statistics, readable by the frontend alongside the
+/// staking-side stats written by PredictionMarket.
+///
+/// Ownership note: the voting oracle owns the voting-side fields
+/// (`votes_cast`, `voting_rewards_earned`). PredictionMarket owns the
+/// staking-side fields. The frontend reads both records and merges them.
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VotingUserStats {
+    pub votes_cast: u32,
+    pub voting_rewards_earned: i128,
+}
+
+/// Read the voting-side stats for `user`, defaulting to zeroed stats.
+pub fn read_voting_user_stats(env: &Env, user: &Address) -> VotingUserStats {
+    env.storage()
+        .persistent()
+        .get(&DataKey::VotingUserStats(user.clone()))
+        .unwrap_or(VotingUserStats {
+            votes_cast: 0,
+            voting_rewards_earned: 0,
+        })
+}
+
+/// Increment `votes_cast` by one for `user`.
+fn bump_votes_cast(env: &Env, user: &Address) {
+    let mut stats = read_voting_user_stats(env, user);
+    stats.votes_cast = stats.votes_cast.saturating_add(1);
+    env.storage()
+        .persistent()
+        .set(&DataKey::VotingUserStats(user.clone()), &stats);
+}
+
+/// Add `amount` to `voting_rewards_earned` for `user`.
+fn add_voting_rewards_earned(env: &Env, user: &Address, amount: i128) {
+    let mut stats = read_voting_user_stats(env, user);
+    stats.voting_rewards_earned = stats.voting_rewards_earned.saturating_add(amount);
+    env.storage()
+        .persistent()
+        .set(&DataKey::VotingUserStats(user.clone()), &stats);
 }
 
 /// Resolve a voting poll when the winning outcome reaches the automatic
@@ -680,5 +728,56 @@ mod test {
             .try_claim_reward(&winner, &1_u64)
             .expect_err("a second claim must be rejected");
         assert_eq!(twice, Ok(PredictXError::AlreadyClaimed));
+    }
+
+    // ── UserStats (#106) ──────────────────────────────────────────────────────
+
+    #[test]
+    fn votes_cast_increments_once_per_vote() {
+        let (env, _admin, client) = setup();
+        let v = voter(&env);
+
+        client.cast_vote(&v, &1_u64, &VoteChoice::Yes);
+        assert_eq!(client.get_voting_user_stats(&v).votes_cast, 1);
+
+        // A second poll by the same voter increments again (once per vote).
+        client.set_poll_status(&2_u64, &PollStatus::Voting);
+        client.cast_vote(&v, &2_u64, &VoteChoice::No);
+        assert_eq!(client.get_voting_user_stats(&v).votes_cast, 2);
+    }
+
+    #[test]
+    fn voting_rewards_earned_accumulates_across_polls() {
+        let (env, admin, client) = setup();
+        let v = voter(&env);
+
+        // Poll 1: voter wins, earns 10.
+        client.cast_vote(&v, &1_u64, &VoteChoice::Yes);
+        for _ in 0..29 {
+            client.cast_vote(&voter(&env), &1_u64, &VoteChoice::Yes);
+        }
+        fund_and_resolve_yes(&env, &client, &admin, 300);
+        client.claim_reward(&v, &1_u64);
+        assert_eq!(client.get_voting_user_stats(&v).voting_rewards_earned, 10);
+
+        // Poll 2: voter wins again, earns another 10 → total 20.
+        client.set_poll_status(&2_u64, &PollStatus::Voting);
+        client.cast_vote(&v, &2_u64, &VoteChoice::Yes);
+        for _ in 0..29 {
+            client.cast_vote(&voter(&env), &2_u64, &VoteChoice::Yes);
+        }
+        client.set_reward_pool(&admin, &2_u64, &300);
+        env.ledger().set_timestamp(1_000_000 + VOTING_WINDOW_SECS);
+        client.auto_resolve(&2_u64);
+        client.claim_reward(&v, &2_u64);
+        assert_eq!(client.get_voting_user_stats(&v).voting_rewards_earned, 20);
+    }
+
+    #[test]
+    fn voting_user_stats_default_to_zero_for_unknown_user() {
+        let (env, _admin, client) = setup();
+        let stats = client.get_voting_user_stats(&voter(&env));
+        assert_eq!(stats.votes_cast, 0);
+        assert_eq!(stats.voting_rewards_earned, 0);
     }
 }

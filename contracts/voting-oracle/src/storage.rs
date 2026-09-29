@@ -1,5 +1,5 @@
 use crate::DataKey;
-use predictx_shared::{PredictXError, VoteChoice, VoteTally};
+use predictx_shared::{PredictXError, UserStats, VoteChoice, VoteTally};
 use soroban_sdk::{Address, Env, Vec};
 
 // ── Admin registry storage ────────────────────────────────────────────────────
@@ -133,4 +133,30 @@ pub fn write_reward_claimed(env: &Env, poll_id: u64, voter: &Address) {
     env.storage()
         .persistent()
         .set(&DataKey::RewardClaimed(poll_id, voter.clone()), &true);
+}
+
+// ── User stats storage ────────────────────────────────────────────────────────
+//
+// `UserStats` is owned by the voting-oracle contract for the community-voting
+// fields (`votes_cast`, `voting_rewards_earned`). The staking-side fields are
+// written by PredictionMarket under a separate key namespace, so the two
+// contracts do not race on the same record. The frontend reads both via the
+// respective contract getters.
+
+/// Read the voting-side `UserStats` for `user`, defaulting to zeroed stats.
+pub fn read_user_stats(env: &Env, user: &Address) -> UserStats {
+    env.storage()
+        .persistent()
+        .get(&DataKey::UserStats(user.clone()))
+        .unwrap_or(UserStats {
+            votes_cast: 0,
+            voting_rewards_earned: 0,
+        })
+}
+
+/// Persist the voting-side `UserStats` for `user`.
+pub fn write_user_stats(env: &Env, user: &Address, stats: &UserStats) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::UserStats(user.clone()), stats);
 }

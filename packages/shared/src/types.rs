@@ -171,6 +171,9 @@ pub struct UserStats {
     pub polls_participated: u32,
     pub polls_won: u32,
     pub polls_lost: u32,
+    /// Incremented once per vote cast by this user (not per poll).
+    /// Written by the VotingOracle contract.
     pub votes_cast: u32,
+    /// Accumulates voter incentive rewards across all polls. Written by the VotingOracle contract.
     pub voting_rewards_earned: i128,
 }
